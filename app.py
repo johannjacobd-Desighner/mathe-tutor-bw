@@ -68,25 +68,35 @@ with st.sidebar:
     st.title(" MatheBW Tutor")
     st.caption("J1 Oberstufe Baden-Württemberg")
     st.markdown("---")
-    api_key = st.text_input("Google Gemini API-Key", type="password", help="Kostenlosen Key auf aistudio.google.com holen")
+    user_api_key = st.text_input("Google Gemini API-Key", type="password", help="Kostenlosen Key auf aistudio.google.com holen")
 
-# Fallback: API Key aus Streamlit Secrets (wenn in der Cloud gehostet)
-if not api_key and "GEMINI_API_KEY" in st.secrets:
+# Fallback: API Key aus Streamlit Secrets (wenn gehostet)
+api_key = None
+if user_api_key:
+    api_key = user_api_key
+elif "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 
 # ---------------------------------------------------------
-# KI-Funktionen mit Google Gemini API
+# Helper Functions: KI-Aufrufe mit Fehlerbehandlung
 # ---------------------------------------------------------
+def prepare_pil_image(image_bytes):
+    """Konvertiert Byte-Daten sicher in ein PIL RGB Image."""
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    return img
+
 def analyze_goodnotes_page(client, image_bytes):
-    image = Image.open(io.BytesIO(image_bytes))
+    image = prepare_pil_image(image_bytes)
     prompt = (
-        "Du bist ein Mathematik-Tutor für das Gymnasium in Baden-Württemberg (Jahrgangsstufe J1 Oberstufe). "
+        "Du bist ein Mathematik-Tutor für das Gymnasium in Baden-Württemberg (Jahrgangsstufe J1 Oberstufe).\n"
         "Analysiere diese Seite einer GoodNotes-Mitschrift.\n"
         "1. Welches mathe-spezifische Thema der J1 (z. B. Analysis: Differentialrechnung/Kurvendiskussion, "
         "Vektorgeometrie/Ebenen oder Stochastik/Bedingte Wahrscheinlichkeit) wird behandelt?\n"
         "2. Erkläre das Thema verständlich und anschaulich mit einem strukturierten Text.\n"
         "3. Gib am Ende eine Zusammenfassung der wichtigsten Formeln und Regeln in Stichpunkten.\n\n"
-        "Formatere deine Antwort in klar strukturiertem Markdown."
+        "Formatiere deine Antwort in klar strukturiertem Markdown."
     )
     response = client.models.generate_content(
         model='gemini-2.5-flash',
@@ -100,12 +110,12 @@ def generate_exam_quiz(client, topic_context):
     {topic_context}
     
     Erstelle eine prüfungsnahe Mathe-Aufgabe im Stil des Abiturs Baden-Württemberg (Pflichtteil ohne WTR oder Wahlteil mit WTR).
-    Gib das Ergebnis im folgenden JSON-Format zurück:
+    Gib das Ergebnis zwingend im folgenden JSON-Format zurück:
     {{
         "aufgabe": "Die detaillierte Aufgabenstellung mit konkreten Zahlenwerten und Funktionen.",
         "musterloesung": "Schritt-für-Schritt Musterlösung inklusive Endergebnis."
     }}
-    Gib NUR das valide JSON zurück, kein weiterer Text.
+    Gib NUR das valide JSON zurück, keinerlei zusätzlichen Text.
     """
     response = client.models.generate_content(
         model='gemini-2.5-flash',
@@ -114,19 +124,19 @@ def generate_exam_quiz(client, topic_context):
     try:
         clean_content = re.search(r'\{.*\}', response.text, re.DOTALL).group(0)
         return json.loads(clean_content)
-    except:
+    except Exception:
         return {
             "aufgabe": "Bestimme die erste Ableitung der Funktion f(x) = x^3 - 4x + 2 und berechne die Steigung an der Stelle x = 2.",
             "musterloesung": "f'(x) = 3x^2 - 4. Setze x = 2 ein: f'(2) = 3(2)^2 - 4 = 12 - 4 = 8."
         }
 
 def evaluate_handwritten_answer(client, question, solution, drawing_bytes):
-    image = Image.open(io.BytesIO(drawing_bytes))
+    image = prepare_pil_image(drawing_bytes)
     prompt = (
         f"Aufgabenstellung: {question}\n"
         f"Musterlösung: {solution}\n\n"
-        "Der Schüler hat seine Lösung mit dem Apple Pencil aufgeschrieben (siehe Bild). "
-        "Analysiere den Rechenweg und das Endergebnis Schritt für Schritt. "
+        "Der Schüler hat seine Lösung mit dem Apple Pencil aufgeschrieben (siehe Bild).\n"
+        "Analysiere den Rechenweg und das Endergebnis Schritt für Schritt.\n"
         "Falls ein Fehler gemacht wurde, markiere genau, in welcher Zeile/an welcher Stelle der Denk- oder Rechenfehler liegt, "
         "und erkläre direkt am Fehler, wie es richtig geht."
     )
@@ -161,82 +171,92 @@ st.title("GoodNotes Mathe-Tutor BW")
 st.write("Lade deine Notizen hoch. Die KI analysiert den Inhalt, erklärt das Thema, schlägt passende Videos vor und prüft dich mit einer Abi-nahen Aufgabe.")
 
 if not api_key:
-    st.info("Bitte trage links in der Seitenleiste deinen kostenlosen **Google Gemini API Key** ein (oder trage ihn in die Streamlit Secrets ein), um zu starten.")
+    st.warning("⚠️ Bitte trage links in der Seitenleiste deinen **Google Gemini API Key** ein oder hinterlege ihn in den Streamlit Secrets.")
 else:
-    client = genai.Client(api_key=api_key)
+    try:
+        client = genai.Client(api_key=api_key)
 
-    uploaded_file = st.file_uploader("GoodNotes Export (PDF / PNG / JPG) hochladen", type=["pdf", "png", "jpg", "jpeg"])
+        uploaded_file = st.file_uploader("GoodNotes Export (PDF / PNG / JPG) hochladen", type=["pdf", "png", "jpg", "jpeg"])
 
-    if uploaded_file and not st.session_state.analysis:
-        with st.spinner("GoodNotes-Mitschrift wird analysiert..."):
-            if uploaded_file.name.endswith('.pdf'):
-                images = convert_from_bytes(uploaded_file.read())
-                img_byte_arr = io.BytesIO()
-                images[0].save(img_byte_arr, format='PNG')
-                image_bytes = img_byte_arr.getvalue()
-            else:
-                image_bytes = uploaded_file.read()
+        if uploaded_file and not st.session_state.analysis:
+            with st.spinner("GoodNotes-Mitschrift wird analysiert..."):
+                try:
+                    if uploaded_file.name.lower().endswith('.pdf'):
+                        images = convert_from_bytes(uploaded_file.read())
+                        img_byte_arr = io.BytesIO()
+                        images[0].save(img_byte_arr, format='PNG')
+                        image_bytes = img_byte_arr.getvalue()
+                    else:
+                        image_bytes = uploaded_file.read()
+                    
+                    st.session_state.analysis = analyze_goodnotes_page(client, image_bytes)
+                    st.session_state.quiz = generate_exam_quiz(client, st.session_state.analysis)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fehler bei der Analyse der Datei: {e}")
+
+        if st.session_state.analysis:
+            topic_name, link_schmidt, link_mathematrix = get_youtube_links(st.session_state.analysis)
             
-            st.session_state.analysis = analyze_goodnotes_page(client, image_bytes)
-            st.session_state.quiz = generate_exam_quiz(client, st.session_state.analysis)
-            st.rerun()
-
-    if st.session_state.analysis:
-        topic_name, link_schmidt, link_mathematrix = get_youtube_links(st.session_state.analysis)
-        
-        st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-        st.markdown('<span class="apple-badge">Themen-Erklärung</span>', unsafe_allow_html=True)
-        st.markdown(st.session_state.analysis)
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-        st.markdown('<span class="apple-badge">Empfohlene Lern-Videos</span>', unsafe_allow_html=True)
-        st.write(f"Passende Videos zum Thema **{topic_name}**:")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"📺 **Lehrer Schmidt**\n\n[{topic_name} bei Lehrer Schmidt suchen]({link_schmidt})")
-        with col2:
-            st.markdown(f"📐 **Mathematrix**\n\n[{topic_name} bei Mathematrix suchen]({link_mathematrix})")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        if st.session_state.quiz:
             st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-            st.markdown('<span class="apple-badge">Prüfungsnahe Testaufgabe (J1 BW)</span>', unsafe_allow_html=True)
-            st.write("### " + st.session_state.quiz["aufgabe"])
-            st.write("Löse die Aufgabe direkt mit dem **Apple Pencil**:")
-            
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 255, 255, 0)",
-                stroke_width=2,
-                stroke_color="#000000",
-                background_color="#FFFFFF",
-                height=320,
-                width=700,
-                drawing_mode="freedraw",
-                key="apple_pencil_canvas",
-            )
-            
-            if st.button("Lösung prüfen lassen"):
-                if canvas_result.image_data is not None:
-                    with st.spinner("Analysiere deine Handschrift und korrigiere den Rechenweg..."):
-                        img = Image.fromarray(canvas_result.image_data.astype('uint8'))
-                        buffered = io.BytesIO()
-                        img.save(buffered, format="PNG")
-                        
-                        feedback = evaluate_handwritten_answer(
-                            client,
-                            st.session_state.quiz["aufgabe"],
-                            st.session_state.quiz["musterloesung"],
-                            buffered.getvalue()
-                        )
-                        
-                        st.markdown("### KI-Feedback & Fehleranalyse")
-                        st.info(feedback)
-                else:
-                    st.warning("Bitte schreibe zuerst deine Lösung auf das Zeichenfeld.")
+            st.markdown('<span class="apple-badge">Themen-Erklärung</span>', unsafe_allow_html=True)
+            st.markdown(st.session_state.analysis)
             st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="apple-card">', unsafe_allow_html=True)
+            st.markdown('<span class="apple-badge">Empfohlene Lern-Videos</span>', unsafe_allow_html=True)
+            st.write(f"Passende Videos zum Thema **{topic_name}**:")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"📺 **Lehrer Schmidt**\n\n[{topic_name} bei Lehrer Schmidt suchen]({link_schmidt})")
+            with col2:
+                st.markdown(f"📐 **Mathematrix**\n\n[{topic_name} bei Mathematrix suchen]({link_mathematrix})")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            if st.session_state.quiz:
+                st.markdown('<div class="apple-card">', unsafe_allow_html=True)
+                st.markdown('<span class="apple-badge">Prüfungsnahe Testaufgabe (J1 BW)</span>', unsafe_allow_html=True)
+                st.write("### " + st.session_state.quiz["aufgabe"])
+                st.write("Löse die Aufgabe direkt mit dem **Apple Pencil**:")
+                
+                canvas_result = st_canvas(
+                    fill_color="rgba(255, 255, 255, 0)",
+                    stroke_width=2,
+                    stroke_color="#000000",
+                    background_color="#FFFFFF",
+                    height=320,
+                    width=700,
+                    drawing_mode="freedraw",
+                    key="apple_pencil_canvas",
+                )
+                
+                if st.button("Lösung prüfen lassen"):
+                    if canvas_result.image_data is not None:
+                        with st.spinner("Analysiere deine Handschrift und korrigiere den Rechenweg..."):
+                            try:
+                                img = Image.fromarray(canvas_result.image_data.astype('uint8'))
+                                buffered = io.BytesIO()
+                                img.save(buffered, format="PNG")
+                                
+                                feedback = evaluate_handwritten_answer(
+                                    client,
+                                    st.session_state.quiz["aufgabe"],
+                                    st.session_state.quiz["musterloesung"],
+                                    buffered.getvalue()
+                                )
+                                
+                                st.markdown("### KI-Feedback & Fehleranalyse")
+                                st.info(feedback)
+                            except Exception as e:
+                                st.error(f"Fehler bei der Auswertung der Lösung: {e}")
+                    else:
+                        st.warning("Bitte schreibe zuerst deine Lösung auf das Zeichenfeld.")
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        if st.button("Neue Notiz analysieren"):
-            st.session_state.analysis = None
-            st.session_state.quiz = None
-            st.rerun()
+            if st.button("Neue Notiz analysieren"):
+                st.session_state.analysis = None
+                st.session_state.quiz = None
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Verbindungsfehler zur Gemini API: {e}")
